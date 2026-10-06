@@ -1,13 +1,13 @@
 /**
- * bg-window — /bg results in a floating mini window instead of the transcript.
+ * bg-window — /btw and /bg answers in a docked side chat window instead of the transcript.
  *
  * How it works:
- *  1. composer.middleware catches "/bg <prompt>" (and "/background <prompt>")
- *     before the app's slash handler, calls prompt.background itself, and
- *     cancels the normal submit — so the "Background task started" line never
- *     lands in chat.
- *  2. ctx.onEvent('background.complete') picks up the answer for task ids WE
- *     started and shows it in the window.
+ *  1. composer.middleware catches "/btw <question>", "/bg <prompt>" and
+ *     "/background <prompt>" before the app's slash handler, calls prompt.btw /
+ *     prompt.background itself, and cancels the normal submit, so the
+ *     "task started" line never lands in chat.
+ *  2. ctx.onEvent('btw.complete' / 'background.complete') picks up the answer
+ *     for task ids WE started and shows it in the window.
  *  3. On apps that ship ctx.claimSideTask (NousResearch/hermes-agent#125968)
  *     the plugin claims each task id, so the core never appends its
  *     "[bg <id>]" transcript line. On older apps, a MutationObserver hides
@@ -24,6 +24,7 @@ import { host } from '@hermes/plugin-sdk'
 const ID = 'bg-window'
 const MIDDLEWARE_AREA = 'composer.middleware'
 const BG_RE = /^\/(?:bg|background)(?:\s+([\s\S]*))?$/i
+const BTW_RE = /^\/btw(?:\s+([\s\S]*))?$/i
 const MAX_TASKS = 30
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,25 @@ export function parseBg(text) {
   const m = String(text ?? '').trim().match(BG_RE)
   if (!m) return null
   return (m[1] ?? '').trim()
+}
+
+/** "/bg x" → {kind:'bg',prompt:'x'}; "/btw x" → {kind:'btw',prompt:'x'}; else null. */
+export function parseSide(text) {
+  const t = String(text ?? '').trim()
+  let m = t.match(BTW_RE)
+  if (m) return { kind: 'btw', prompt: (m[1] ?? '').trim() }
+  m = t.match(BG_RE)
+  if (m) return { kind: 'bg', prompt: (m[1] ?? '').trim() }
+  return null
+}
+
+/** Task id from a core transcript header: "[bg 1a2b3c]" or "[btw \"q\" (btw_1a2b3c)]". */
+export function transcriptTaskId(txt) {
+  const s = String(txt ?? '')
+  let m = s.match(/\[bg ((?:bg_)?[0-9a-f]{6})\]/)
+  if (m) return m[1].startsWith('bg_') ? m[1] : 'bg_' + m[1]
+  m = s.match(/\[btw\b[^\n]*?\((btw_[0-9a-f]{6})\)\]/)
+  return m ? m[1] : null
 }
 
 export function esc(s) {
@@ -95,7 +115,7 @@ export function followUpPrompt(prev, text) {
 // ---------------------------------------------------------------------------
 
 let ctxRef = null
-let tasks = [] // { id, prompt, shown, status: 'running'|'done'|'error', result, startedAt, doneAt }
+let tasks = [] // { id, kind: 'bg'|'btw', prompt, shown, status: 'running'|'done'|'error', result, startedAt, doneAt }
 const ours = new Set()
 const claimed = new Set() // task ids the app itself keeps out of the transcript
 let open = false
@@ -117,9 +137,9 @@ function runtimeSessionId() {
 // Gateway
 // ---------------------------------------------------------------------------
 
-async function startTask(prompt, shown) {
+async function startTask(prompt, shown, kind = 'bg') {
   const sid = runtimeSessionId()
-  const local = { id: 'pending_' + Date.now(), prompt, shown: shown ?? prompt, status: 'running', result: '', startedAt: Date.now(), doneAt: 0 }
+  const local = { id: 'pending_' + Date.now(), kind, prompt, shown: shown ?? prompt, status: 'running', result: '', startedAt: Date.now(), doneAt: 0 }
   tasks.push(local)
   openWindow()
   render()
@@ -128,7 +148,7 @@ async function startTask(prompt, shown) {
     render(); save(); return
   }
   try {
-    const r = await host.request('prompt.background', { session_id: sid, text: prompt })
+    const r = await host.request(kind === 'btw' ? 'prompt.btw' : 'prompt.background', { session_id: sid, text: prompt })
     local.id = r?.task_id || local.id
     ours.add(local.id)
     // Apps with the side-task claim hook skip the transcript line for this id;
@@ -158,7 +178,7 @@ function onComplete(ev) {
 }
 
 // ---------------------------------------------------------------------------
-// Hide the core's "[bg <id>]" transcript copies for our tasks (display only)
+// Hide the core's "[bg <id>]" / "[btw … (<id>)]" transcript copies for our tasks (display only)
 // ---------------------------------------------------------------------------
 
 function hideTranscriptCopies() {
@@ -166,9 +186,8 @@ function hideTranscriptCopies() {
   const nodes = document.querySelectorAll('[data-slot="aui_system-message-root"]')
   for (const n of nodes) {
     if (n.dataset.bgwHidden) continue
-    const txt = n.textContent || ''
-    const m = txt.match(/\[bg ((?:bg_)?[0-9a-f]{6})\]/)
-    if (!m || !ours.has(m[1].startsWith('bg_') ? m[1] : 'bg_' + m[1])) continue
+    const id = transcriptTaskId(n.textContent || '')
+    if (!id || !ours.has(id) || claimed.has(id)) continue
     const wrap = n.closest('[data-message-id]') || n
     wrap.style.display = 'none'
     n.dataset.bgwHidden = '1'
@@ -200,6 +219,7 @@ const CSS = `
 #bgw-root .bgw-body{flex:0 1 auto;min-height:0;overflow-y:auto;padding:2px 12px 8px;display:flex;flex-direction:column;gap:8px}
 #bgw-root .bgw-empty{margin:8px auto;color:var(--ui-text-tertiary,#888);font-size:.9em;text-align:center}
 #bgw-root .bgw-q{align-self:flex-end;max-width:85%;background:var(--ui-bg-quaternary,rgba(255,255,255,.08));border-radius:10px;padding:4px 9px;white-space:pre-wrap;word-break:break-word}
+#bgw-root .bgw-tag{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--ui-text-tertiary,#888);margin-right:6px}
 #bgw-root .bgw-a{line-height:1.5;word-break:break-word}
 #bgw-root .bgw-a p{margin:0 0 .5em}#bgw-root .bgw-a p:last-child{margin-bottom:0}
 #bgw-root .bgw-a ul,#bgw-root .bgw-a ol{margin:0 0 .5em;padding-left:1.3em}
@@ -240,12 +260,12 @@ function mount() {
   root = document.createElement('div')
   root.id = 'bgw-root'
   root.setAttribute('role', 'dialog')
-  root.setAttribute('aria-label', 'Background tasks')
+  root.setAttribute('aria-label', 'Side chat')
   root.innerHTML = `
-    <div class="bgw-head" title="Collapse / expand"><div class="bgw-title">Background<b></b></div><div class="bgw-sum"></div><div class="bgw-sp"></div>
+    <div class="bgw-head" title="Collapse / expand"><div class="bgw-title">Side chat<b></b></div><div class="bgw-sum"></div><div class="bgw-sp"></div>
       <div class="bgw-btns"><button class="bgw-btn" data-a="toggle" title="Collapse">${ICON_CHEV}</button><button class="bgw-btn" data-a="clear" title="Clear finished">${ICON_TRASH}</button><button class="bgw-btn" data-a="close" title="Close">${ICON_X}</button></div></div>
     <div class="bgw-body"></div>
-    <div class="bgw-foot"><div class="bgw-in"><textarea rows="1" placeholder="Follow up…"></textarea><button class="bgw-send" title="Run in background">${ICON_ENTER}</button></div></div>`
+    <div class="bgw-foot"><div class="bgw-in"><textarea rows="1" placeholder="Follow up…"></textarea><button class="bgw-send" title="Ask on the side">${ICON_ENTER}</button></div></div>`
   document.body.appendChild(root)
 
   const chip = document.createElement('div')
@@ -276,7 +296,7 @@ function mount() {
     els.input.value = ''
     autosize()
     const prev = [...tasks].reverse().find(t => t.status === 'done')
-    startTask(followUpPrompt(prev, text), text)
+    startTask(followUpPrompt(prev, text), text, prev?.kind || 'btw')
   }
   els.send.onclick = submit
   els.input.addEventListener('keydown', e => {
@@ -332,7 +352,7 @@ function place() {
   els.chip.classList.toggle('show', !!showChip)
   if (showChip) {
     const label = running ? `${running} running` : `${unseen} done`
-    const html = `${running ? '<span class="bgw-dot" style="width:6px;height:6px;border-radius:50%;background:var(--ui-accent,#e0806a);display:inline-block"></span>' : ''}bg · ${label}`
+    const html = `${running ? '<span class="bgw-dot" style="width:6px;height:6px;border-radius:50%;background:var(--ui-accent,#e0806a);display:inline-block"></span>' : ''}side · ${label}`
     if (els.chip.innerHTML !== html) els.chip.innerHTML = html
   }
 }
@@ -398,11 +418,11 @@ function render() {
   els.count.textContent = running ? `${running} running` : ''
   renderSummary()
   if (!list.length) {
-    els.body.innerHTML = '<div class="bgw-empty">No background tasks.<br>Type <code>/bg &lt;prompt&gt;</code> in the composer.</div>'
+    els.body.innerHTML = '<div class="bgw-empty">Nothing here yet.<br>Type <code>/btw &lt;question&gt;</code> or <code>/bg &lt;prompt&gt;</code> in the composer.</div>'
     return
   }
   els.body.innerHTML = list.map(t => {
-    const q = `<div class="bgw-q">${esc(t.shown)}</div>`
+    const q = `<div class="bgw-q"><span class="bgw-tag">${t.kind === 'btw' ? 'btw' : 'bg'}</span>${esc(t.shown)}</div>`
     if (t.status === 'running') return q + `<div class="bgw-run"><span class="bgw-dot"></span><span data-run="${esc(t.id)}">Working… ${ago(Date.now() - t.startedAt)}</span></div>`
     const meta = `<div class="bgw-meta">${ago(t.doneAt - t.startedAt)} · <button data-copy="${esc(t.id)}">copy</button> · <button data-rm="${esc(t.id)}">remove</button></div>`
     return q + `<div><div class="bgw-a${t.status === 'error' ? ' err' : ''}">${md(t.result || '(empty result)')}</div>${meta}</div>`
@@ -417,30 +437,30 @@ function render() {
 // ---------------------------------------------------------------------------
 
 async function middleware(input) {
-  const prompt = parseBg(input?.text)
-  if (prompt === null) return input
+  const side = parseSide(input?.text)
+  if (!side) return input
   if (input?.attachments?.length) return input // let core handle attachments
-  if (!prompt) { openWindow(); render(); clearDraft(); return null }
-  startTask(prompt)
+  if (!side.prompt) { openWindow(); render(); clearDraft(); return null }
+  startTask(side.prompt, side.prompt, side.kind)
   clearDraft()
-  return null // cancel the normal submit; core never sees /bg
+  return null // cancel the normal submit; core never sees /bg or /btw
 }
 
 function clearDraft() {
   try { host.composer?.setDraft?.(null, '') } catch { /* ignore */ }
 }
 
-export const __test = { parseBg, md, esc, followUpPrompt, summaryText }
+export const __test = { parseBg, parseSide, transcriptTaskId, md, esc, followUpPrompt, summaryText }
 
 export default {
   id: ID,
   name: 'Background Window',
-  description: 'Runs /bg tasks in a floating mini window instead of dropping results into the chat.',
+  description: 'Runs /btw and /bg in a docked side chat window instead of dropping answers into the chat.',
   register(ctx) {
     ctxRef = ctx
     const saved = ctx.storage?.get('tasks', [])
     if (Array.isArray(saved)) {
-      tasks = saved.map(t => (t.status === 'running' ? { ...t, status: 'error', result: 'Lost track of this task (app reloaded before it finished).', doneAt: t.doneAt || Date.now() } : t))
+      tasks = saved.map(t => ({ kind: 'bg', ...t })).map(t => (t.status === 'running' ? { ...t, status: 'error', result: 'Lost track of this task (app reloaded before it finished).', doneAt: t.doneAt || Date.now() } : t))
       for (const t of tasks) ours.add(t.id)
     }
     mount()
@@ -449,6 +469,7 @@ export default {
 
     ctx.register({ id: 'bg-intercept', area: MIDDLEWARE_AREA, order: 5, data: { handler: middleware } })
     ctx.onEvent('background.complete', onComplete)
+    ctx.onEvent('btw.complete', onComplete)
 
     observer = new MutationObserver(() => hideTranscriptCopies())
     observer.observe(document.body, { childList: true, subtree: true })

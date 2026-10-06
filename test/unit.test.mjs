@@ -9,7 +9,7 @@ const src = readFileSync(join(here, '../desktop/plugin.js'), 'utf8')
   .replace("import { host } from '@hermes/plugin-sdk'", 'const host = {}')
 const tmp = join(process.env.TMPDIR || '/tmp', 'bgw-test'); mkdirSync(tmp, { recursive: true })
 const f = join(tmp, 'plugin.mjs'); writeFileSync(f, src)
-const { parseBg, md, followUpPrompt, summaryText } = (await import(pathToFileURL(f))).__test
+const { parseBg, parseSide, transcriptTaskId, md, followUpPrompt, summaryText } = (await import(pathToFileURL(f))).__test
 
 assert.equal(parseBg('/bg do a thing'), 'do a thing')
 assert.equal(parseBg('  /background  multi\nline '), 'multi\nline')
@@ -17,6 +17,21 @@ assert.equal(parseBg('/bg'), '')
 assert.equal(parseBg('/btw hi'), null)
 assert.equal(parseBg('/bgx hi'), null)
 assert.equal(parseBg('hello /bg'), null)
+
+assert.deepEqual(parseSide('/btw what was that file?'), { kind: 'btw', prompt: 'what was that file?' })
+assert.deepEqual(parseSide('/BTW  multi\nline '), { kind: 'btw', prompt: 'multi\nline' })
+assert.deepEqual(parseSide('/btw'), { kind: 'btw', prompt: '' })
+assert.deepEqual(parseSide('/bg run it'), { kind: 'bg', prompt: 'run it' })
+assert.deepEqual(parseSide('/background run it'), { kind: 'bg', prompt: 'run it' })
+assert.equal(parseSide('/btwx hi'), null)
+assert.equal(parseSide('hey /btw hi'), null)
+
+assert.equal(transcriptTaskId('[bg 1a2b3c]\nanswer'), 'bg_1a2b3c')
+assert.equal(transcriptTaskId('[bg bg_1a2b3c]\nanswer'), 'bg_1a2b3c')
+assert.equal(transcriptTaskId('[btw "what is (x)?" (btw_00ff12)]\nanswer'), 'btw_00ff12')
+assert.equal(transcriptTaskId('[btw (btw_00ff12)]\nanswer'), 'btw_00ff12')
+assert.equal(transcriptTaskId('[btw "q"]\nanswer'), null)
+assert.equal(transcriptTaskId('just text'), null)
 
 assert.ok(!md('<img src=x onerror=alert(1)>').includes('<img'))
 assert.ok(!md('[x](javascript:alert(1))').includes('href'))
